@@ -1,5 +1,5 @@
 use std::any::Any;
-use wayland::{Handle, XdgSurface, XdgToplevel, ZwlrLayerSurfaceV1};
+use wayland::{Handle, WlSubsurface, XdgSurface, XdgToplevel, ZwlrLayerSurfaceV1};
 
 /// The shell role of a [`Window`](crate::WindowManager). Object-safe so it can
 /// live as `Box<dyn Surface>`; deliberately small.
@@ -51,6 +51,26 @@ impl Surface for XdgShellSurface {
     fn destroy(&mut self) {
         self.toplevel.destroy();
         self.xdg_surface.destroy();
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// `wl_subcompositor` role: a window whose `wl_surface` is a subsurface of
+/// another window's surface. A subsurface is not a shell role — it needs no
+/// `ack_configure` — this exists only to satisfy the [`Surface`] seam and own
+/// the `wl_subsurface` object's lifetime.
+pub struct SubsurfaceRole {
+    pub subsurface: Handle<WlSubsurface>,
+}
+
+impl Surface for SubsurfaceRole {
+    fn ack_configure(&self, _serial: u32) {}
+
+    fn destroy(&mut self) {
+        self.subsurface.destroy();
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

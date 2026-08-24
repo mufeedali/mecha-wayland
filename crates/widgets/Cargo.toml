@@ -1,0 +1,19 @@
+[package]
+name = "widgets"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "widgets"
+path = "src/lib.rs"
+
+[dependencies]
+ui = { path = "../ui" }
+renderer = { path = "../renderer" }
+assets = { path = "../assets" }
+utils = { path = "../utils" }
+taffy = { workspace = true }
+
+[build-dependencies]
+anyhow = { workspace = true }
+assets = { path = "../assets", features = ["builder"] }

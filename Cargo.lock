@@ -233,15 +233,12 @@ dependencies = [
 name = "counter"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "app",
- "assets",
  "io-ring",
- "renderer",
- "taffy",
  "ui",
  "utils",
  "wayland",
+ "widgets",
  "window-manager",
 ]
 
@@ -1720,6 +1717,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
+name = "widgets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assets",
+ "renderer",
+ "taffy",
+ "ui",
+ "utils",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1764,6 +1773,7 @@ dependencies = [
  "taffy",
  "ui",
  "wayland",
+ "widgets",
 ]
 
 [[package]]

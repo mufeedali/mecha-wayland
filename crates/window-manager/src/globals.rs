@@ -1,11 +1,12 @@
 use wayland::{
-    Handle, WlCompositor, WlKeyboard, WlOutput, WlPointer, WlSeat, WlTouch, XdgWmBase,
-    ZwlrLayerShellV1, ZwpLinuxDmabufV1,
+    Handle, WlCompositor, WlKeyboard, WlOutput, WlPointer, WlSeat, WlSubcompositor, WlTouch,
+    XdgWmBase, ZwlrLayerShellV1, ZwpLinuxDmabufV1,
 };
 
 #[derive(Default)]
 pub struct WaylandGlobals {
     pub compositor: Option<Handle<WlCompositor>>,
+    pub subcompositor: Option<Handle<WlSubcompositor>>,
     pub output: Option<Handle<WlOutput>>,
     pub layer_shell: Option<Handle<ZwlrLayerShellV1>>,
     pub xdg_wm_base: Option<Handle<XdgWmBase>>,

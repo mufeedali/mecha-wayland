@@ -1,5 +1,5 @@
 [[atlas]]
-name = "counter"
+name = "widgets"
 
 [[atlas.font]]
 name = "inter"

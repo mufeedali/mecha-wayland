@@ -71,6 +71,7 @@ pub(crate) trait AnyWindow {
     ) -> Option<Handle<WlCallback>>;
     fn on_buffer_release(&mut self, buffer_id: ObjectId);
     fn surface(&self) -> &Handle<WlSurface>;
+    fn surface_handle(&self) -> Option<&Handle<WlSurface>>;
     fn ack_configure(&self, serial: u32);
     fn role_any_mut(&mut self) -> Option<&mut dyn Any>;
     fn on_pointer_event(&mut self, ev: &WlPointerEvent, buffer: &mut Vec<Box<dyn Any>>);
@@ -334,6 +335,10 @@ impl<T: WidgetList + 'static> AnyWindow for Window<T> {
 
     fn surface(&self) -> &Handle<WlSurface> {
         self.surface.as_ref().expect("surface initialized")
+    }
+
+    fn surface_handle(&self) -> Option<&Handle<WlSurface>> {
+        self.surface.as_ref()
     }
 
     fn ack_configure(&self, serial: u32) {

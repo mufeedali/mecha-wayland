@@ -8,6 +8,7 @@ use wayland::{
     ExtSessionLockV1, ExtSessionLockV1Event, Handle, Interface, WlOutput, WlPointerButtonState,
     WlPointerEvent, WlRegistryEvent,
 };
+use widgets::{BG, Click, Counter, Hover, atlas};
 use window_manager::prelude::*;
 use window_manager::{Color, Surface};
 
@@ -52,6 +53,13 @@ struct LockScreen {
     output: Option<Handle<WlOutput>>,
     #[lens(skip)]
     lock_window: Option<WindowHandle<()>>,
+    /// The counter widget, embedded as a desynced subsurface of the lock
+    /// surface once it is configured.
+    #[lens(skip)]
+    widget: Option<WindowHandle<Counter>>,
+    /// Last pointer position in the focused surface's local coordinates.
+    #[lens(skip)]
+    pointer: ui::Point,
 }
 
 fn on_registry(s: &mut LockScreen, ev: &WlRegistryEvent) {
@@ -90,8 +98,48 @@ fn on_pointer(s: &mut LockScreen, ev: &WlPointerEvent) {
     match s.lock_window {
         None if target == s.control.id() => lock(s),
         Some(handle) if target == handle.id() => {
+            // Destroying the lock window tears down its subsurface children.
+            s.widget = None;
             s.wm.destroy(handle.id());
             s.lock_window = None;
+        }
+        _ => {}
+    }
+}
+
+/// Drive the embedded counter widget. Pointer events over the widget's
+/// subsurface arrive with widget-surface-local coordinates, so the same
+/// Hover/Click translation as the standalone counter app works unchanged.
+/// Pointer focus is checked so events landing elsewhere on the lock surface
+/// (e.g. the unlock button) are not forwarded to the widget.
+fn on_widget_pointer(s: &mut LockScreen, ev: &WlPointerEvent) {
+    let Some(handle) = s.widget else {
+        return;
+    };
+    let over_widget = s.wm.current_pointer_window() == Some(handle.id());
+    match ev {
+        WlPointerEvent::Enter {
+            surface_x,
+            surface_y,
+            ..
+        }
+        | WlPointerEvent::Motion {
+            surface_x,
+            surface_y,
+            ..
+        } if over_widget => {
+            s.pointer = ui::Point::new(*surface_x, *surface_y);
+            handle.set(Hover(Some(s.pointer)), &mut s.wm);
+        }
+        WlPointerEvent::Leave { .. } => {
+            handle.set(Hover(None), &mut s.wm);
+        }
+        WlPointerEvent::Button {
+            state: WlPointerButtonState::Pressed,
+            button,
+            ..
+        } if over_widget && *button == BTN_LEFT => {
+            handle.set(Click(s.pointer), &mut s.wm);
         }
         _ => {}
     }
@@ -128,9 +176,29 @@ fn on_configure(s: &mut LockScreen, ev: &ExtSessionLockSurfaceV1Event) {
         height,
         ..
     } = ev;
-    if let Some(handle) = s.lock_window {
-        s.wm.configure(handle.id(), *serial, *width, *height);
+    let Some(handle) = s.lock_window else {
+        return;
+    };
+
+    // The first configure reveals the output size: embed the counter centered
+    // on the lock surface as a desynced subsurface. The lock window's surface
+    // already exists, so the spawn initializes immediately; later configures
+    // leave the widget where it is.
+    if s.widget.is_none() {
+        const WIDGET_W: u32 = 320;
+        const WIDGET_H: u32 = 150;
+        s.widget = Some(s.wm.spawn_subsurface(
+            handle.id(),
+            (width.saturating_sub(WIDGET_W) / 2) as i32,
+            (height.saturating_sub(WIDGET_H) / 2) as i32,
+            WIDGET_W,
+            WIDGET_H,
+            BG,
+            Counter::new(),
+        ));
     }
+
+    s.wm.configure(handle.id(), *serial, *width, *height);
 }
 
 fn on_lock(s: &mut LockScreen, ev: &ExtSessionLockV1Event) {
@@ -144,6 +212,8 @@ fn on_lock(s: &mut LockScreen, ev: &ExtSessionLockV1Event) {
         }
         ExtSessionLockV1Event::Finished { .. } => {
             if let Some(handle) = s.lock_window.take() {
+                // Destroying the lock window tears down its subsurface children.
+                s.widget = None;
                 s.wm.destroy(handle.id());
             }
         }
@@ -153,6 +223,7 @@ fn on_lock(s: &mut LockScreen, ev: &ExtSessionLockV1Event) {
 fn main() {
     let ring = Ring::default();
     let mut wm = WindowManager::new(ring.proxy());
+    wm.upload_atlas(&atlas::WIDGETS);
 
     let control = wm.spawn_window(
         WindowSettings {
@@ -175,6 +246,8 @@ fn main() {
         manager: None,
         output: None,
         lock_window: None,
+        widget: None,
+        pointer: ui::Point::new(-1.0, -1.0),
     };
 
     let mut app = App::new(state)
@@ -184,6 +257,7 @@ fn main() {
             Module::new()
                 .on(on_registry)
                 .on(on_pointer)
+                .on(on_widget_pointer)
                 .on(on_configure)
                 .on(on_lock),
         );

@@ -20,7 +20,7 @@ pub struct UiEventsReady;
 impl app::Event for UiEventsReady {}
 
 use globals::WaylandGlobals;
-use surface::{LayerShellSurface, XdgShellSurface};
+use surface::{LayerShellSurface, SubsurfaceRole, XdgShellSurface};
 use window::{AnyWindow, Window};
 
 pub use surface::Surface;
@@ -57,6 +57,14 @@ impl<T: WidgetList + 'static> WindowHandle<T> {
     }
 }
 
+struct PendingSubsurface {
+    id: WindowId,
+    parent: WindowId,
+    x: i32,
+    y: i32,
+    window: Box<dyn AnyWindow>,
+}
+
 #[derive(State)]
 pub struct WindowManager {
     wayland: Wayland,
@@ -65,7 +73,11 @@ pub struct WindowManager {
     #[lens(skip)]
     pending: Vec<(WindowSettings, Box<dyn AnyWindow>)>,
     #[lens(skip)]
+    pending_subsurfaces: Vec<PendingSubsurface>,
+    #[lens(skip)]
     windows: HashMap<WindowId, Box<dyn AnyWindow>>,
+    #[lens(skip)]
+    parent_of: HashMap<WindowId, WindowId>,
     #[lens(skip)]
     pub event_buffer: Vec<Box<dyn Any>>,
     #[lens(skip)]
@@ -93,7 +105,9 @@ impl WindowManager {
             globals: WaylandGlobals::default(),
             renderer,
             pending: Vec::new(),
+            pending_subsurfaces: Vec::new(),
             windows: HashMap::new(),
+            parent_of: HashMap::new(),
             event_buffer: Vec::new(),
             frame_callbacks: HashMap::new(),
             wl_surfaces: HashMap::new(),
@@ -132,6 +146,8 @@ impl WindowManager {
     }
 
     fn rearm_frames(&mut self) {
+        self.flush_pending_subsurfaces();
+
         let to_kick: Vec<WindowId> = self
             .windows
             .iter()
@@ -225,6 +241,131 @@ impl WindowManager {
         }
     }
 
+    /// Spawn a window whose `wl_surface` is a **desynced subsurface** of
+    /// `parent`'s surface, positioned at `(x, y)` in the parent's coordinate
+    /// space. The child keeps its own surface: independent damage, double
+    /// buffer, frame callback, and input routing (pointer events arrive with
+    /// child-surface-local coordinates), so existing per-window input paths
+    /// work unchanged.
+    ///
+    /// The subsurface is set to desync mode, so each child presents on its own
+    /// commit — no parent re-commit cascade is needed. The child surface has no
+    /// shell role (a subsurface is not a role), so no `configure` events are
+    /// received; the window is configured with the given size immediately.
+    ///
+    /// If the subcompositor global is not bound or the parent has no surface
+    /// yet, the spawn is deferred (like [`spawn_window`]'s pending queue) and
+    /// retried on the next `pre_poll`; `handle.set` before then is a no-op.
+    pub fn spawn_subsurface<T: WidgetList + 'static>(
+        &mut self,
+        parent: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        clear_color: Color,
+        ui: T,
+    ) -> WindowHandle<T> {
+        let touch_config = ui.touch_config();
+        let gesture_config = ui.gesture_config();
+
+        let id = WindowId(self.next_window_id);
+        self.next_window_id += 1;
+
+        let window = Box::new(Window::new(
+            id,
+            width,
+            height,
+            clear_color,
+            ui,
+            touch_config,
+            gesture_config,
+        ));
+
+        let parent_ready = self
+            .windows
+            .get(&parent)
+            .is_some_and(|w| w.surface_handle().is_some());
+        if parent_ready && self.globals.subcompositor.is_some() && self.globals.dmabuf.is_some() {
+            self.init_subsurface(id, parent, x, y, window);
+        } else {
+            self.pending_subsurfaces.push(PendingSubsurface {
+                id,
+                parent,
+                x,
+                y,
+                window,
+            });
+        }
+        WindowHandle {
+            id,
+            _ui: PhantomData,
+        }
+    }
+
+    fn init_subsurface(
+        &mut self,
+        id: WindowId,
+        parent: WindowId,
+        x: i32,
+        y: i32,
+        mut window: Box<dyn AnyWindow>,
+    ) {
+        let compositor = self
+            .globals
+            .compositor
+            .clone()
+            .unwrap_or_else(|| panic!("compositor global missing"));
+        let subcompositor = self
+            .globals
+            .subcompositor
+            .clone()
+            .unwrap_or_else(|| panic!("subcompositor global missing"));
+        let parent_surface = self
+            .windows
+            .get(&parent)
+            .and_then(|w| w.surface_handle())
+            .cloned()
+            .unwrap_or_else(|| panic!("parent window surface not initialized"));
+
+        let child = compositor.create_surface();
+        let subsurface = subcompositor.get_subsurface(&child, &parent_surface);
+        subsurface.set_position(x, y);
+        subsurface.set_desync();
+        window.init(child.clone(), Box::new(SubsurfaceRole { subsurface }));
+        let surface_id = child.object_id().expect("just created");
+        self.wl_surfaces.insert(surface_id, id);
+        self.parent_of.insert(id, parent);
+        self.windows.insert(id, window);
+        child.commit();
+
+        // No shell role means no configure event: allocate slots and draw the
+        // first frame immediately, mirroring `configure`.
+        let (w, h) = self
+            .window_dimensions(id)
+            .expect("window inserted before configure");
+        self.configure_window(id, w, h);
+        self.do_render_frame(id, true);
+    }
+
+    fn flush_pending_subsurfaces(&mut self) {
+        if self.globals.subcompositor.is_none() || self.globals.dmabuf.is_none() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_subsurfaces);
+        for p in pending {
+            let parent_ready = self
+                .windows
+                .get(&p.parent)
+                .is_some_and(|w| w.surface_handle().is_some());
+            if parent_ready {
+                self.init_subsurface(p.id, p.parent, p.x, p.y, p.window);
+            } else {
+                self.pending_subsurfaces.push(p);
+            }
+        }
+    }
+
     /// Seam drive point: downcast a window's [`Surface`] role to its concrete
     /// app type, mirroring the UI-side [`window_mut`](Self::window_mut). Lets an
     /// app handler mutate role state it does not own (e.g. flipping the
@@ -254,6 +395,18 @@ impl WindowManager {
     }
 
     pub fn destroy(&mut self, id: WindowId) {
+        // Subsurfaces are destroyed with their parent: tear children down first
+        // so no orphaned subsurface outlives its parent surface.
+        let children: Vec<WindowId> = self
+            .parent_of
+            .iter()
+            .filter(|(_, p)| **p == id)
+            .map(|(c, _)| *c)
+            .collect();
+        for child in children {
+            self.destroy(child);
+        }
+        self.parent_of.remove(&id);
         if let Some(mut window) = self.windows.remove(&id) {
             window.destroy();
         }
@@ -406,6 +559,9 @@ pub fn module<S>() -> impl app::RegisteredModule<WindowManager, S> {
                 match interface.as_str() {
                     WlCompositor::NAME => {
                         wm.globals.compositor = Some(sender.bind(*name, *version))
+                    }
+                    WlSubcompositor::NAME => {
+                        wm.globals.subcompositor = Some(sender.bind(*name, *version))
                     }
                     ZwlrLayerShellV1::NAME => {
                         wm.globals.layer_shell = Some(sender.bind(*name, *version))

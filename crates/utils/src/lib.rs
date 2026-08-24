@@ -403,6 +403,9 @@ mod color_tests {
 
     #[test]
     fn over_both_transparent_is_transparent() {
-        assert_eq!(Color::TRANSPARENT.over(Color::TRANSPARENT), Color::TRANSPARENT);
+        assert_eq!(
+            Color::TRANSPARENT.over(Color::TRANSPARENT),
+            Color::TRANSPARENT
+        );
     }
 }
