@@ -23,6 +23,9 @@ pub struct WindowSettings {
     pub kind: WindowKind,
     pub touch_config: Option<interactivity::touch::TouchConfig>,
     pub gesture_config: Option<interactivity::gesture::GestureConfig>,
+    /// Color attachment is a `TEXTURE_2D` so another renderer can bind it.
+    /// Default path is a write-only renderbuffer.
+    pub color_texture: bool,
 }
 
 pub enum WindowKind {
@@ -99,6 +102,7 @@ pub struct Window<T> {
     pub interactivity: InteractivityState,
     pub hit_areas: HitAreaRegistry,
     input_enabled: bool,
+    color_texture: bool,
 }
 
 impl<T: WidgetList> Window<T> {
@@ -110,6 +114,7 @@ impl<T: WidgetList> Window<T> {
         ui: T,
         touch_config: Option<interactivity::touch::TouchConfig>,
         gesture_config: Option<interactivity::gesture::GestureConfig>,
+        color_texture: bool,
     ) -> Self {
         Self {
             id,
@@ -128,6 +133,7 @@ impl<T: WidgetList> Window<T> {
             interactivity: InteractivityState::with_configs(touch_config, gesture_config),
             hit_areas: HitAreaRegistry::new(),
             input_enabled: true,
+            color_texture,
         }
     }
 
@@ -183,7 +189,7 @@ impl<T: WidgetList + 'static> AnyWindow for Window<T> {
             }
         }
 
-        let slots = crate::render::alloc_slots(renderer, dmabuf, w, h);
+        let slots = crate::render::alloc_slots(renderer, dmabuf, w, h, self.color_texture);
         self.buffer_ids = [
             Some(slots[0].buffer.object_id().expect("live buffer")),
             Some(slots[1].buffer.object_id().expect("live buffer")),

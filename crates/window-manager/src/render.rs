@@ -152,8 +152,9 @@ pub fn alloc_slots(
     dmabuf: &Handle<ZwpLinuxDmabufV1>,
     width: u32,
     height: u32,
+    color_texture: bool,
 ) -> [Slot; 2] {
-    std::array::from_fn(|_| alloc_slot(renderer, dmabuf, width, height))
+    std::array::from_fn(|_| alloc_slot(renderer, dmabuf, width, height, color_texture))
 }
 
 fn alloc_slot(
@@ -161,10 +162,17 @@ fn alloc_slot(
     dmabuf: &Handle<ZwpLinuxDmabufV1>,
     width: u32,
     height: u32,
+    color_texture: bool,
 ) -> Slot {
-    let surface = renderer
-        .create_surface::<DmaBuf>(width, height)
-        .expect("DmaBuf surface allocation failed");
+    let surface = if color_texture {
+        renderer
+            .create_texture_surface(width, height)
+            .expect("DmaBuf texture surface allocation failed")
+    } else {
+        renderer
+            .create_surface::<DmaBuf>(width, height)
+            .expect("DmaBuf surface allocation failed")
+    };
 
     let buffer = {
         let fd = surface.backend.prime_fd.as_fd();

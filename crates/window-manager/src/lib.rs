@@ -174,6 +174,7 @@ impl WindowManager {
             ui,
             touch_config,
             gesture_config,
+            settings.color_texture,
         ));
         self.pending.push((settings, window));
         WindowHandle {
@@ -214,6 +215,7 @@ impl WindowManager {
             ui,
             touch_config,
             gesture_config,
+            false,
         ));
         window.init(surface, role);
         let surface_id = window.surface().object_id().expect("surface initialized");

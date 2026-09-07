@@ -164,6 +164,7 @@ fn main() {
             },
             touch_config: None,
             gesture_config: None,
+            color_texture: false,
         },
         (),
     );

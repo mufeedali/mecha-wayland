@@ -43,6 +43,7 @@ pub(crate) type PfnCreateImageKHR = unsafe extern "C" fn(
 pub(crate) type PfnDestroyImageKHR = unsafe extern "C" fn(*const c_void, *mut c_void) -> u32;
 
 pub(crate) type PfnRboImageOES = unsafe extern "C" fn(target: u32, image: *mut c_void);
+pub(crate) type PfnTexImageOES = unsafe extern "C" fn(target: u32, image: *mut c_void);
 
 // ── SurfaceBackend trait ───────────────────────────────────────────────────
 
@@ -129,6 +130,7 @@ pub struct Renderer {
     pub(crate) fn_create_image: PfnCreateImageKHR,
     pub(crate) fn_destroy_image: PfnDestroyImageKHR,
     pub(crate) fn_rbo_image: PfnRboImageOES,
+    pub(crate) fn_tex_image: Option<PfnTexImageOES>,
     textures: HashMap<TextureId, GpuTexture>,
     atlas_map: HashMap<assets::AtlasId, TextureId>,
     next_texture_id: u32,
@@ -240,6 +242,9 @@ impl Renderer {
                     .context("glEGLImageTargetRenderbufferStorageOES not found — driver lacks GL_OES_EGL_image")?,
             )
         };
+        let fn_tex_image = egl_lib
+            .get_proc_address("glEGLImageTargetTexture2DOES")
+            .map(|f| unsafe { std::mem::transmute(f) });
 
         let command_queue_registry = CommandQueueRegistry::new();
         Ok(Self {
@@ -252,6 +257,7 @@ impl Renderer {
             fn_create_image,
             fn_destroy_image,
             fn_rbo_image,
+            fn_tex_image,
             textures: HashMap::new(),
             atlas_map: HashMap::new(),
             next_texture_id: 0,
@@ -269,6 +275,23 @@ impl Renderer {
     ) -> Result<RenderableSurface<B>> {
         self.make_current()?;
         let backend = B::allocate(self, width, height)?;
+        let fbo = backend.fbo();
+        Ok(RenderableSurface {
+            width,
+            height,
+            fbo,
+            backend,
+        })
+    }
+
+    /// Allocate a DmaBuf whose color attachment is a `TEXTURE_2D`.
+    pub fn create_texture_surface(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<RenderableSurface<DmaBuf>> {
+        self.make_current()?;
+        let backend = DmaBuf::allocate_texture(self, width, height)?;
         let fbo = backend.fbo();
         Ok(RenderableSurface {
             width,
