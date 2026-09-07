@@ -82,6 +82,10 @@ pub struct WindowManager {
     touch_window_map: HashMap<i32, WindowId>,
     #[lens(skip)]
     next_window_id: u32,
+    /// When true (default), a dirty window presents on `wl_surface.frame`.
+    /// When false, the app calls [`Self::render_frame`].
+    #[lens(skip)]
+    auto_present: bool,
 }
 
 impl WindowManager {
@@ -102,7 +106,44 @@ impl WindowManager {
             current_keyboard_window: None,
             touch_window_map: HashMap::new(),
             next_window_id: 0,
+            auto_present: true,
         }
+    }
+
+    pub fn set_auto_present(&mut self, on: bool) {
+        self.auto_present = on;
+    }
+
+    pub fn renderer(&mut self) -> &mut Renderer {
+        &mut self.renderer
+    }
+
+    /// Clear, run `underlay`, then UI, then attach. Pass `|_, _| {}` for UI only.
+    pub fn render_frame<T, F>(
+        &mut self,
+        handle: WindowHandle<T>,
+        force_full: bool,
+        underlay: F,
+    ) -> Option<wayland::Handle<wayland::WlCallback>>
+    where
+        T: WidgetList + 'static,
+        F: FnOnce(&mut Renderer, &renderer::RenderableSurface<renderer::DmaBuf>),
+    {
+        let id = handle.id;
+        let window = self
+            .windows
+            .get_mut(&id)?
+            .as_any_mut()
+            .downcast_mut::<Window<T>>()?;
+        let cb = window.render_frame(&mut self.renderer, force_full, underlay)?;
+        if let Some(cb_id) = cb.object_id() {
+            self.frame_callbacks.insert(cb_id, id);
+        }
+        Some(cb)
+    }
+
+    pub fn frame_in_flight(&self, id: WindowId) -> bool {
+        self.frame_callbacks.values().any(|&w| w == id)
     }
 
     pub fn start(&mut self) {
@@ -127,11 +168,10 @@ impl WindowManager {
             .downcast_mut::<Window<W>>()
     }
 
-    fn frame_in_flight(&self, id: WindowId) -> bool {
-        self.frame_callbacks.values().any(|&w| w == id)
-    }
-
     fn rearm_frames(&mut self) {
+        if !self.auto_present {
+            return;
+        }
         let to_kick: Vec<WindowId> = self
             .windows
             .iter()
@@ -275,7 +315,9 @@ impl WindowManager {
         }
         self.configure_window(id, w, h);
         // First frame after configure: bounds are ZERO, so force full.
-        self.do_render_frame(id, true);
+        if self.auto_present {
+            self.do_render_frame(id, true);
+        }
     }
 
     fn flush_pending(&mut self) {
@@ -577,10 +619,11 @@ pub fn module<S>() -> impl app::RegisteredModule<WindowManager, S> {
             };
 
             if let Some(window_id) = wm.frame_callbacks.remove(&obj_id) {
-                if wm
-                    .windows
-                    .get(&window_id)
-                    .map_or(false, |w| w.is_back_released())
+                if wm.auto_present
+                    && wm
+                        .windows
+                        .get(&window_id)
+                        .is_some_and(|w| w.is_back_released())
                 {
                     // Steady-state repaint: damage-driven, never forced full.
                     wm.do_render_frame(window_id, false);

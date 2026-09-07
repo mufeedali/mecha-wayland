@@ -1,7 +1,7 @@
 use interactivity::InteractivityState;
 use interactivity::hit::{HitArea, HitAreaRegistry};
 use renderer::commands::{Color, Rect};
-use renderer::{DmaBuf, Renderer};
+use renderer::{DmaBuf, RenderableSurface, Renderer};
 use std::any::Any;
 use taffy::{AvailableSpace, NodeId, Size, Style};
 use ui::{EventCtx, OnChange, Point, RenderCommand, WidgetList, WidgetTree};
@@ -148,6 +148,121 @@ impl<T: WidgetList> Window<T> {
         self.ui.change(v);
         self.needs_render = true;
     }
+
+    pub fn is_back_released(&self) -> bool {
+        self.slots.as_ref().is_some_and(|s| s[self.back].released)
+    }
+
+    /// Bind the back slot, clear, run `underlay`, then the widget tree.
+    pub fn render_frame<F>(
+        &mut self,
+        renderer: &mut Renderer,
+        force_full: bool,
+        underlay: F,
+    ) -> Option<Handle<WlCallback>>
+    where
+        F: FnOnce(&mut Renderer, &RenderableSurface<DmaBuf>),
+    {
+        if !self.is_back_released() || self.root_node.is_none() {
+            return None;
+        }
+        let back = self.back;
+        let root_node = self.root_node.expect("configured");
+        let width = self.width;
+        let height = self.height;
+        let clear_color = self.clear_color;
+        let full = Rect::new(0.0, 0.0, width as f32, height as f32);
+
+        // Always drain damage first, even if we end up skipping — otherwise the
+        // per-node `pending_damage` fields accumulate forever.
+        let flushed = self.ui.flush_damage(&mut self.tree);
+        let class = if force_full {
+            ui::Damage::Layout
+        } else {
+            flushed
+        };
+
+        let owed_back = self.slots.as_ref().expect("configured")[back].owed;
+        let (relayout, region, this_damage) =
+            match crate::render::plan_frame(class, owed_back, full) {
+                crate::render::FramePlan::Skip => return None,
+                crate::render::FramePlan::Draw {
+                    relayout,
+                    region,
+                    this_damage,
+                } => (relayout, region, this_damage),
+            };
+
+        // A `Paint` frame reuses the layout from the last `Layout`/full frame;
+        // only relayout when geometry may have moved.
+        if relayout {
+            ui::compute_layout(
+                &mut self.tree,
+                root_node,
+                Size {
+                    width: AvailableSpace::Definite(width as f32),
+                    height: AvailableSpace::Definite(height as f32),
+                },
+            );
+        }
+
+        // Seed the walk: root depth 0, and the window clear colour as the
+        // opaque background every glyph/quad composites against.
+        let commands = self
+            .ui
+            .render_children(&self.tree, Point::ZERO, 0.0, clear_color);
+
+        self.hit_areas.clear();
+        for cmd in &commands {
+            if let RenderCommand::RegisterHitArea { id, rect } = cmd {
+                self.hit_areas.push(HitArea {
+                    id: *id,
+                    rect: *rect,
+                });
+            }
+        }
+
+        // Full frames draw to the whole surface; partial frames clip to the
+        // accumulated region.
+        let scissor = (!relayout).then_some(region);
+        {
+            let slots = self.slots.as_ref().expect("configured");
+            crate::render::submit_scene(
+                renderer,
+                &slots[back].surface,
+                clear_color,
+                commands,
+                scissor,
+                underlay,
+            );
+        }
+
+        // Buffer-age bookkeeping: back is now current, the other slot owes this
+        // frame's damage.
+        {
+            let slots = self.slots.as_ref().expect("configured");
+            let mut owed = [slots[0].owed, slots[1].owed];
+            crate::render::apply_owed(&mut owed, back, this_damage);
+            let slots = self.slots.as_mut().expect("configured");
+            slots[0].owed = owed[0];
+            slots[1].owed = owed[1];
+        }
+
+        let surface = self.surface.as_ref().expect("configured");
+        let slots = self.slots.as_mut().expect("configured");
+        let next_frame = surface.frame();
+        surface.attach(Some(&slots[back].buffer), 0, 0);
+        surface.damage(
+            region.x() as i32,
+            region.y() as i32,
+            region.width() as i32,
+            region.height() as i32,
+        );
+        surface.commit();
+        slots[back].released = false;
+        self.back ^= 1;
+        Some(next_frame)
+    }
 }
 
 impl<T: WidgetList + 'static> AnyWindow for Window<T> {
@@ -230,7 +345,7 @@ impl<T: WidgetList + 'static> AnyWindow for Window<T> {
     }
 
     fn is_back_released(&self) -> bool {
-        self.slots.as_ref().map_or(false, |s| s[self.back].released)
+        Window::is_back_released(self)
     }
 
     fn render_frame(
@@ -238,101 +353,7 @@ impl<T: WidgetList + 'static> AnyWindow for Window<T> {
         renderer: &mut Renderer,
         force_full: bool,
     ) -> Option<Handle<WlCallback>> {
-        let back = self.back;
-        let root_node = self.root_node.expect("configured");
-        let width = self.width;
-        let height = self.height;
-        let clear_color = self.clear_color;
-        let full = Rect::new(0.0, 0.0, width as f32, height as f32);
-
-        // Always drain damage first, even if we end up skipping — otherwise the
-        // per-node `pending_damage` fields accumulate forever.
-        let flushed = self.ui.flush_damage(&mut self.tree);
-        let class = if force_full {
-            ui::Damage::Layout
-        } else {
-            flushed
-        };
-
-        let owed_back = self.slots.as_ref().expect("configured")[back].owed;
-        let (relayout, region, this_damage) =
-            match crate::render::plan_frame(class, owed_back, full) {
-                crate::render::FramePlan::Skip => return None,
-                crate::render::FramePlan::Draw {
-                    relayout,
-                    region,
-                    this_damage,
-                } => (relayout, region, this_damage),
-            };
-
-        // A `Paint` frame reuses the layout from the last `Layout`/full frame;
-        // only relayout when geometry may have moved.
-        if relayout {
-            ui::compute_layout(
-                &mut self.tree,
-                root_node,
-                Size {
-                    width: AvailableSpace::Definite(width as f32),
-                    height: AvailableSpace::Definite(height as f32),
-                },
-            );
-        }
-
-        // Seed the walk: root depth 0, and the window clear colour as the
-        // opaque background every glyph/quad composites against.
-        let commands = self
-            .ui
-            .render_children(&self.tree, Point::ZERO, 0.0, clear_color);
-
-        self.hit_areas.clear();
-        for cmd in &commands {
-            if let RenderCommand::RegisterHitArea { id, rect } = cmd {
-                self.hit_areas.push(HitArea {
-                    id: *id,
-                    rect: *rect,
-                });
-            }
-        }
-
-        // Full frames draw to the whole surface; partial frames clip to the
-        // accumulated region.
-        let scissor = (!relayout).then_some(region);
-        {
-            let slots = self.slots.as_ref().expect("configured");
-            crate::render::submit_scene(
-                renderer,
-                &slots[back].surface,
-                clear_color,
-                commands,
-                scissor,
-            );
-        }
-
-        // Buffer-age bookkeeping: back is now current, the other slot owes this
-        // frame's damage.
-        {
-            let slots = self.slots.as_ref().expect("configured");
-            let mut owed = [slots[0].owed, slots[1].owed];
-            crate::render::apply_owed(&mut owed, back, this_damage);
-            let slots = self.slots.as_mut().expect("configured");
-            slots[0].owed = owed[0];
-            slots[1].owed = owed[1];
-        }
-
-        let surface = self.surface.as_ref().expect("configured");
-        let slots = self.slots.as_mut().expect("configured");
-        let next_frame = surface.frame();
-        surface.attach(Some(&slots[back].buffer), 0, 0);
-        surface.damage(
-            region.x() as i32,
-            region.y() as i32,
-            region.width() as i32,
-            region.height() as i32,
-        );
-        surface.commit();
-        slots[back].released = false;
-        self.back ^= 1;
-        Some(next_frame)
+        Window::render_frame(self, renderer, force_full, |_, _| {})
     }
 
     fn on_buffer_release(&mut self, buffer_id: ObjectId) {

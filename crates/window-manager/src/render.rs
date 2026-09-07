@@ -58,16 +58,22 @@ pub(crate) fn apply_owed(owed: &mut [Rect; 2], back: usize, this_damage: Rect) {
     owed[other] = owed[other].union(this_damage);
 }
 
-pub(crate) fn submit_scene<B: SurfaceBackend>(
+pub(crate) fn submit_scene<B, F>(
     renderer: &mut Renderer,
     surface: &RenderableSurface<B>,
     clear_color: Color,
     commands: Vec<RenderCommand>,
     scissor: Option<Rect>,
-) {
+    underlay: F,
+) where
+    B: SurfaceBackend,
+    F: FnOnce(&mut Renderer, &RenderableSurface<B>),
+{
     renderer.active_surface(surface);
     renderer.set_scissor(scissor);
     renderer.send_command(ClearColor(clear_color));
+    renderer.process_clear();
+    underlay(renderer, surface);
 
     for cmd in commands {
         match cmd {
