@@ -173,8 +173,14 @@ impl<T: WidgetList + 'static> AnyWindow for Window<T> {
         w: u32,
         h: u32,
     ) {
-        if self.slots.is_some() {
+        if self.slots.is_some() && self.width == w && self.height == h {
             return;
+        }
+        if let Some(old) = self.slots.take() {
+            for slot in old {
+                renderer.destroy_surface(slot.surface);
+                slot.buffer.destroy();
+            }
         }
 
         let slots = crate::render::alloc_slots(renderer, dmabuf, w, h);
@@ -186,21 +192,23 @@ impl<T: WidgetList + 'static> AnyWindow for Window<T> {
         self.width = w;
         self.height = h;
 
-        let child_ids = self.ui.build_children(&mut self.tree);
-        let root_node = self
-            .tree
-            .new_with_children(
-                Style {
-                    size: Size {
-                        width: taffy::Dimension::percent(1.0),
-                        height: taffy::Dimension::percent(1.0),
+        if self.root_node.is_none() {
+            let child_ids = self.ui.build_children(&mut self.tree);
+            let root_node = self
+                .tree
+                .new_with_children(
+                    Style {
+                        size: Size {
+                            width: taffy::Dimension::percent(1.0),
+                            height: taffy::Dimension::percent(1.0),
+                        },
+                        ..Style::default()
                     },
-                    ..Style::default()
-                },
-                &child_ids,
-            )
-            .expect("root node");
-        self.root_node = Some(root_node);
+                    &child_ids,
+                )
+                .expect("root node");
+            self.root_node = Some(root_node);
+        }
     }
 
     fn is_configured(&self) -> bool {
