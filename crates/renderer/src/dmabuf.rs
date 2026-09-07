@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use gbm::{BufferObjectFlags, Format as GbmFormat};
+use gbm::{BufferObjectFlags, Format as GbmFormat, Modifier};
 use glow::HasContext;
 use khronos_egl as egl;
 use std::{
@@ -46,18 +46,20 @@ impl SurfaceBackend for DmaBuf {
     fn allocate(renderer: &Renderer, width: u32, height: u32) -> Result<Self> {
         // ── Session 1-3: GBM BO → prime fd → EGLImageKHR ─────────────────
 
+        // Flags-only gbm_bo_create reports INVALID; ask for LINEAR by modifier.
         let gbm_bo = renderer
             ._gbm_device
-            .create_buffer_object::<()>(
+            .create_buffer_object_with_modifiers2::<()>(
                 width,
                 height,
                 GbmFormat::Argb8888,
-                BufferObjectFlags::RENDERING | BufferObjectFlags::LINEAR,
+                [Modifier::Linear].into_iter(),
+                BufferObjectFlags::RENDERING,
             )
             .map_err(|e| anyhow::anyhow!("gbm_bo_create: {e}"))?;
 
         let modifier = u64::from(gbm_bo.modifier());
-        tracing::info!(modifier = format!("0x{modifier:016x}"), "gbm bo modifier");
+        tracing::debug!(modifier = format!("0x{modifier:016x}"), "gbm bo modifier");
 
         let prime_fd = gbm_bo
             .fd()
