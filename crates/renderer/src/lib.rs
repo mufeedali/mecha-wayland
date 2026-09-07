@@ -134,6 +134,7 @@ pub struct Renderer {
     next_texture_id: u32,
     viewport_width: u32,
     viewport_height: u32,
+    pipelines: bool,
 }
 
 // SAFETY: accessed from one thread only.
@@ -256,6 +257,7 @@ impl Renderer {
             next_texture_id: 0,
             viewport_width: 0,
             viewport_height: 0,
+            pipelines: false,
         })
     }
 
@@ -265,6 +267,7 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<RenderableSurface<B>> {
+        self.make_current()?;
         let backend = B::allocate(self, width, height)?;
         let fbo = backend.fbo();
         Ok(RenderableSurface {
@@ -279,6 +282,7 @@ impl Renderer {
     ///
     /// All surfaces must be destroyed before dropping the `Renderer`.
     pub fn destroy_surface<B: SurfaceBackend>(&self, surface: RenderableSurface<B>) {
+        let _ = self.make_current();
         let RenderableSurface { backend, .. } = surface;
         backend.destroy(self);
     }
@@ -295,7 +299,15 @@ impl Renderer {
     /// dimensions, and update the renderer's internal viewport so command queues
     /// use the correct pixel sizes. Call once per frame before `send_command` /
     /// `process_command_queue`. Replaces the manual bind + viewport pattern.
+    pub fn make_current(&self) -> Result<()> {
+        self.egl
+            .make_current(self.display, None, None, Some(self.context))
+            .context("eglMakeCurrent")?;
+        Ok(())
+    }
+
     pub fn active_surface<B: SurfaceBackend>(&mut self, surface: &RenderableSurface<B>) {
+        let _ = self.make_current();
         unsafe {
             self.gl
                 .bind_framebuffer(glow::FRAMEBUFFER, Some(surface.fbo));
@@ -336,6 +348,7 @@ impl Renderer {
         format: TextureFormat,
         data: &[u8],
     ) -> Result<TextureId> {
+        self.make_current()?;
         let handle = unsafe {
             let t = self
                 .gl
@@ -426,9 +439,12 @@ impl Renderer {
         *self.atlas_map.get(&atlas_id).expect("atlas not uploaded")
     }
 
-    /// Compile the opaque (Shader A) and translucent (Shader B) programs. Call
-    /// once, after a surface is active so a GL context exists.
+    /// Compile shader programs. Idempotent; makes this context current first.
     pub fn init_pipelines(&mut self) {
+        if self.pipelines {
+            return;
+        }
+        self.make_current().expect("eglMakeCurrent");
         let ctx = RenderContext {
             gl: &self.gl,
             viewport_width: self.viewport_width,
@@ -436,6 +452,7 @@ impl Renderer {
             textures: &self.textures,
         };
         self.command_queue_registry.init(&ctx);
+        self.pipelines = true;
     }
 
     /// Queue a draw. Commands fan into the opaque/translucent pass queues; no
@@ -481,6 +498,7 @@ impl Renderer {
     /// Convenience: clear, then the opaque pass, then the translucent pass — the
     /// whole frame in submission-agnostic paint order.
     pub fn render_frame(&mut self) {
+        let _ = self.make_current();
         self.process_clear();
         self.process_opaque();
         self.process_translucent();
@@ -490,6 +508,7 @@ impl Renderer {
     /// rendering into a DMA-buf surface and before committing it to the
     /// compositor, so the compositor never reads a partially-rendered buffer.
     pub fn finish(&self) {
+        let _ = self.make_current();
         unsafe { self.gl.finish() };
     }
 }
